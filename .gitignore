@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pkl
+data/raw/*.csv
+data/processed/*.parquet
+data/processed/*.csv
+telemetry_vault/

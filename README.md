@@ -56,7 +56,7 @@ pip install pandas numpy scikit-learn pyarrow requests
 To run the full monitoring simulation, ingestion, and anomaly detection:
 
 ```bash
-python anomaly_detector.py
+python network_anomaly_detector.py
 ```
 
 ## 📁 Project Structure
@@ -64,7 +64,7 @@ python anomaly_detector.py
 ```
 Network-Performance-Anomaly-Detector/
 │
-├── anomaly_detector.py          # Main pipeline orchestration
+├── network_anomaly_detector.py   # Main pipeline orchestration
 ├── requirements.txt              # Python dependencies
 ├── README.md                     # Project documentation
 │
