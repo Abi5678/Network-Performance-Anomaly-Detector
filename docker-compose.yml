@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  anomaly-detector:
+    build: .
+    container_name: network-anomaly-detector
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    environment:
+      - PROMETHEUS_ENABLED=true
+      - PROMETHEUS_PORT=8000
+      - LOG_LEVEL=INFO
+    ports:
+      - "8000:8000"  # Prometheus metrics
+    command: ["--max-packets", "50000"]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    depends_on:
+      - anomaly-detector
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:

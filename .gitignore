@@ -1,7 +1,40 @@
+# Python
 __pycache__/
 *.pyc
-*.pkl
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Data files (large/generated)
 data/raw/*.csv
+data/raw/*.pcap.gz
 data/processed/*.parquet
 data/processed/*.csv
+data/processed/plots/*.png
+
+# Models (generated)
+models/*.pkl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment
+.env
+.venv/
+venv/
+
+# Docker
+grafana/
+
+# Legacy
 telemetry_vault/

@@ -5,13 +5,22 @@ A data engineering pipeline for monitoring high-throughput network performance
 and detecting chronic application-level issues using Isolation Forest.
 
 Uses real MAWI Working Group PCAP traces for authentic network telemetry.
+
+Features:
+- Real PCAP data ingestion from MAWI repository
+- Isolation Forest anomaly detection
+- Prometheus metrics export for Grafana dashboards
+- Streaming mode for continuous monitoring
+- Comprehensive visualization suite
 """
 
 import argparse
 import gzip
 import os
+import signal
 import socket
-import struct
+import sys
+import time
 from collections import defaultdict
 from datetime import datetime
 
@@ -251,6 +260,13 @@ class NetworkMonitor:
         self.model.fit(X_scaled)
         print(f"[TRAIN] Isolation Forest trained on {len(df)} samples.")
 
+    def train_from_dataframe(self, df):
+        """Train directly from a DataFrame without saving to parquet first."""
+        X = df[self.FEATURES]
+        X_scaled = self.scaler.fit_transform(X)
+        self.model.fit(X_scaled)
+        print(f"[TRAIN] Isolation Forest trained on {len(df)} samples.")
+
     def save_model(self):
         model_path = os.path.join(MODELS_DIR, "isolation_forest.pkl")
         scaler_path = os.path.join(MODELS_DIR, "scaler.pkl")
@@ -314,10 +330,118 @@ class NetworkMonitor:
         print()
 
 
+class StreamingDetector:
+    """
+    Continuous monitoring mode that processes PCAP data in batches.
+    Useful for real-time anomaly detection with Prometheus metrics export.
+    """
+
+    def __init__(self, monitor: NetworkMonitor, loader: MAWIDataLoader, interval: int = 300):
+        self.monitor = monitor
+        self.loader = loader
+        self.interval = interval
+        self.running = False
+        self._pcap_index = 0
+
+    def start(self, pcap_urls=None, max_packets_per_batch=10000):
+        """Start continuous monitoring loop."""
+        if pcap_urls is None:
+            pcap_urls = MAWI_SAMPLES
+
+        self.running = True
+        print(f"\n[STREAMING] Starting continuous monitoring (interval: {self.interval}s)")
+        print("[STREAMING] Press Ctrl+C to stop\n")
+
+        # Setup signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\n[STREAMING] Shutdown signal received...")
+            self.running = False
+
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+        iteration = 0
+        while self.running:
+            iteration += 1
+            start_time = time.time()
+
+            print(f"\n{'─' * 60}")
+            print(f"  STREAMING ITERATION {iteration}")
+            print(f"{'─' * 60}")
+
+            try:
+                # Rotate through available PCAP files
+                pcap_url = pcap_urls[self._pcap_index % len(pcap_urls)]
+                self._pcap_index += 1
+
+                # Fetch and process data
+                df = self.loader.fetch_real_network_data(
+                    pcap_url=pcap_url,
+                    max_packets=max_packets_per_batch
+                )
+
+                if df.empty:
+                    print("[STREAMING] No data in batch, skipping...")
+                    continue
+
+                # Detect anomalies
+                results = self.monitor.detect_anomalies(df)
+
+                # Calculate processing time
+                processing_time = time.time() - start_time
+
+                # Update Prometheus metrics if available
+                try:
+                    from metrics_exporter import update_from_dataframe
+                    update_from_dataframe(results, processing_time=processing_time, model_trained=True)
+                except ImportError:
+                    pass
+
+                # Print summary
+                anomaly_count = results["is_anomaly"].sum()
+                print(f"\n[STREAMING] Batch complete: {len(results)} flows, {anomaly_count} anomalies")
+                print(f"[STREAMING] Processing time: {processing_time:.2f}s")
+
+                # Wait for next iteration
+                sleep_time = max(0, self.interval - processing_time)
+                if sleep_time > 0 and self.running:
+                    print(f"[STREAMING] Next batch in {sleep_time:.0f}s...")
+                    time.sleep(sleep_time)
+
+            except Exception as e:
+                print(f"[STREAMING] Error in batch: {e}")
+                time.sleep(10)  # Brief pause before retry
+
+        print("\n[STREAMING] Monitoring stopped.")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Network Performance Anomaly Detector - Real MAWI Data"
+        description="Network Performance Anomaly Detector - Real MAWI Data",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Basic run with default settings
+  python network_anomaly_detector.py
+
+  # Use a pre-trained model
+  python network_anomaly_detector.py --load-model
+
+  # Process more packets for better accuracy
+  python network_anomaly_detector.py --max-packets 200000
+
+  # Enable Prometheus metrics server
+  python network_anomaly_detector.py --metrics
+
+  # Run in continuous streaming mode
+  python network_anomaly_detector.py --streaming --interval 60
+
+  # Full production setup
+  python network_anomaly_detector.py --streaming --metrics --interval 300
+        """
     )
+
+    # Data options
     parser.add_argument(
         "--pcap-url", type=str, default=None,
         help="MAWI PCAP URL to download (default: 2019 sample trace)",
@@ -326,6 +450,8 @@ def parse_args():
         "--max-packets", type=int, default=100000,
         help="Maximum packets to parse from PCAP (default: 100000)",
     )
+
+    # Model options
     parser.add_argument(
         "--contamination", type=float, default=0.05,
         help="Expected anomaly fraction (default: 0.05)",
@@ -334,23 +460,84 @@ def parse_args():
         "--load-model", action="store_true",
         help="Load a previously saved model instead of retraining",
     )
+
+    # Output options
     parser.add_argument(
         "--no-plots", action="store_true",
         help="Skip generating visualization plots",
     )
+
+    # Metrics options
+    parser.add_argument(
+        "--metrics", action="store_true",
+        help="Enable Prometheus metrics server",
+    )
+    parser.add_argument(
+        "--metrics-port", type=int, default=8000,
+        help="Prometheus metrics port (default: 8000)",
+    )
+
+    # Streaming options
+    parser.add_argument(
+        "--streaming", action="store_true",
+        help="Enable continuous streaming mode",
+    )
+    parser.add_argument(
+        "--interval", type=int, default=300,
+        help="Streaming interval in seconds (default: 300)",
+    )
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    start_time = time.time()
+
+    # Initialize components
     monitor = NetworkMonitor(contamination=args.contamination)
     loader = MAWIDataLoader()
 
-    # Step 1: Load real MAWI data
+    # Start Prometheus metrics server if enabled
+    metrics_server = None
+    if args.metrics:
+        try:
+            from metrics_exporter import start_metrics_server
+            start_metrics_server(args.metrics_port)
+        except ImportError:
+            print("[WARN] metrics_exporter.py not found. Metrics disabled.")
+
+    # Print header
     print("\n" + "=" * 60)
     print("  NETWORK ANOMALY DETECTOR - MAWI Real Data Pipeline")
+    print("=" * 60)
+    print(f"  Mode:          {'Streaming' if args.streaming else 'Batch'}")
+    print(f"  Max packets:   {args.max_packets:,}")
+    print(f"  Contamination: {args.contamination}")
+    print(f"  Metrics:       {'Enabled (port ' + str(args.metrics_port) + ')' if args.metrics else 'Disabled'}")
     print("=" * 60 + "\n")
 
+    # Handle streaming mode
+    if args.streaming:
+        # Ensure model is loaded or trained first
+        if not args.load_model or not monitor.load_model():
+            print("[STREAMING] Training initial model...")
+            df = loader.fetch_real_network_data(
+                pcap_url=args.pcap_url,
+                max_packets=args.max_packets
+            )
+            if df.empty:
+                print("[ERROR] No data for initial training. Exiting.")
+                return
+            monitor.train_from_dataframe(df)
+            monitor.save_model()
+
+        # Start streaming
+        streaming = StreamingDetector(monitor, loader, interval=args.interval)
+        streaming.start(max_packets_per_batch=args.max_packets)
+        return
+
+    # Batch mode
     if args.load_model and monitor.load_model():
         print("[PIPELINE] Using previously saved model.")
         # Still need data for detection
@@ -359,7 +546,7 @@ def main():
             max_packets=args.max_packets
         )
     else:
-        # Step 2: Fetch and parse real PCAP data
+        # Fetch and parse real PCAP data
         df = loader.fetch_real_network_data(
             pcap_url=args.pcap_url,
             max_packets=args.max_packets
@@ -369,21 +556,32 @@ def main():
             print("[ERROR] No data extracted from PCAP. Exiting.")
             return
 
-        # Step 3: Store raw + processed
+        # Store raw + processed
         monitor.store_raw_csv(df, name="mawi_network_data")
         parquet_path = monitor.store_to_parquet(df, name="mawi_network_data")
 
-        # Step 4: Train
+        # Train
         monitor.train_anomaly_detector(parquet_path)
         monitor.save_model()
 
-    # Step 5: Detect anomalies on the same data (or could use a second PCAP for testing)
+    # Detect anomalies
     results = monitor.detect_anomalies(df)
 
-    # Step 6: Export report
+    # Calculate processing time
+    processing_time = time.time() - start_time
+
+    # Update metrics
+    if args.metrics:
+        try:
+            from metrics_exporter import update_from_dataframe
+            update_from_dataframe(results, processing_time=processing_time, model_trained=True)
+        except ImportError:
+            pass
+
+    # Export report
     monitor.export_report(results)
 
-    # Step 7: Generate visualizations
+    # Generate visualizations
     if not args.no_plots:
         try:
             from visualize import generate_all_plots
@@ -392,6 +590,8 @@ def main():
             print("[WARN] visualize.py not found. Skipping plots.")
         except Exception as e:
             print(f"[WARN] Plot generation failed: {e}")
+
+    print(f"\n[PIPELINE] Total execution time: {processing_time:.2f}s")
 
 
 if __name__ == "__main__":
